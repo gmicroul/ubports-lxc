@@ -1,7 +1,7 @@
 #!/bin/bash
-# fedora42 全功能一键启动脚本 v3（稳定版）
+# fedora42 全功能一键启动脚本 v4（稳定版）
 # XFCE 桌面 + PulseAudio 音频（socat TCP:32016）+ 容器设备修复
-# 每次启动强制重启 socat，防止旧 fd 卡死
+# v4: 递归杀 socat 进程组，清端口不残留
 # 用法: bash start-xfce.sh
 
 CONTAINER=fedora42
@@ -32,9 +32,19 @@ echo "  Device nodes created"
 
 echo ""
 echo "=== 3/5 启动 PulseAudio 音频转发 ==="
-# 强制杀旧 socat，清端口
-kill $(ss -tlnp | grep ":$PULSE_TCP_PORT " | grep -oP 'pid=\K\d+') 2>/dev/null
-sleep 1
+# 斩草除根：杀所有 socat + 占端口进程
+OLD_PIDS=$(ss -tlnp | grep ":$PULSE_TCP_PORT " | grep -oP 'pid=\K\d+')
+if [ -n "$OLD_PIDS" ]; then
+    for pid in $OLD_PIDS; do
+        kill -9 "$pid" 2>/dev/null
+        # 杀子进程
+        PGID=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+        [ -n "$PGID" ] && kill -9 -"$PGID" 2>/dev/null
+    done
+    sleep 2
+fi
+# 再补一刀：删 socket 文件确保通路
+rm -f /tmp/pulse-tcp-$PULSE_TCP_PORT 2>/dev/null
 # 起新的 socat
 nohup socat TCP-LISTEN:$PULSE_TCP_PORT,reuseaddr,fork UNIX-CONNECT:$PULSE_SOCKET > /dev/null 2>&1 &
 SOCAT_PID=$!
@@ -69,11 +79,10 @@ fi
 
 echo ""
 echo "=== 5/5 启动 XFCE 桌面 ==="
-sudo lxc-attach -n $CONTAINER -- su - phablet -c "
-    export PULSE_SERVER=tcp:localhost:$PULSE_TCP_PORT
-    echo 'export PULSE_SERVER=tcp:localhost:$PULSE_TCP_PORT' >> ~/.bashrc
+sudo lxc-attach -n $CONTAINER -- env DISPLAY=:0 PULSE_SERVER=tcp:localhost:$PULSE_TCP_PORT su - phablet -c '
+    echo "export PULSE_SERVER=tcp:localhost:'$PULSE_TCP_PORT'" >> ~/.bashrc
     DISPLAY=:0 startxfce4
-" &
+' &
 sleep 2
 echo "  XFCE launched"
 
