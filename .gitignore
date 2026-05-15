@@ -1,0 +1,8 @@
+# configs/xfce/
+*.xml
+
+# 容器实际配置（含机器特定路径）
+config/fedora42-real.conf
+
+# 旧脚本
+scripts/lxc-ut-fix.sh

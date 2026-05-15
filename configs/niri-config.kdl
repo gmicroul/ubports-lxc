@@ -1,0 +1,51 @@
+# Niri 配置 - Ubuntu Touch 共存方案
+# 放在 /etc/niri/config.kdl
+
+input {
+    focus-follows-mouse xwayland
+    warp-mouse-on-focus-change false
+
+    touchpad {
+        tap
+        tap-button-map left-middle-right
+        natural-scroll
+    }
+}
+
+output "DSI-1" {
+    scale 2.0
+}
+
+binds {
+    Mod+Q quit
+    Mod+Shift+Q power-off-monitors
+    Mod+E eject-all-outputs
+
+    Mod+Shift+Left focus-column-left
+    Mod+Shift+Right focus-column-right
+    Mod+Shift+Up focus-workspace-up
+    Mod+Shift+Down focus-workspace-down
+    Mod+Shift+F11 fullscreen-window
+}
+
+layout {
+    gaps 4 4 4 4
+    border {
+        active 2
+        inactive 1
+    }
+}
+
+window-rules {
+    match props(app-id="firefox") {
+        max-column-width 1200
+    }
+}
+
+# 默认不启用窗口装饰
+prefer-no-csd false
+
+# 动画
+animations {
+    slower 1.0
+}
