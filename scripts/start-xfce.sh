@@ -1,25 +1,42 @@
 #!/bin/bash
-# fedora42 全功能一键启动脚本 v4（稳定版）
+# fedora42 全功能一键启动脚本 v5（稳定版）
 # XFCE 桌面 + PulseAudio 音频（socat TCP:32016）+ 容器设备修复
-# v4: 递归杀 socat 进程组，清端口不残留
+# v5: 容器启动状态检测 + 递归杀 socat 进程组
 # 用法: bash start-xfce.sh
 
 CONTAINER=fedora42
 PULSE_TCP_PORT=32016
 PULSE_SOCKET=/run/user/32011/pulse/native
-CONTAINER_PID=$(sudo lxc-info -n $CONTAINER -p 2>/dev/null | grep -oP '\d+')
+CONTAINER_PID=""
+
+# sudo 保活：先跑一次 sudo，缓存凭证
+sudo -v 2>/dev/null || sudo true 2>/dev/null
 
 echo "============================================"
-echo " fedora42 全功能启动脚本 v3"
+echo " fedora42 全功能启动脚本 v5"
 echo " PulseAudio: tcp:localhost:32016"
+echo " 6/6 启动流程"
 echo "============================================"
 
 echo ""
 echo "=== 1/5 启动容器 ==="
 sudo lxc-start -n $CONTAINER -d 2>/dev/null
-sleep 3
-CONTAINER_PID=$(sudo lxc-info -n $CONTAINER -p 2>/dev/null | grep -oP '\d+')
-echo "  PID: $CONTAINER_PID"
+# 等待容器 running，最多等 15 秒
+for i in 1 2 3 4 5; do
+    sudo lxc-info -n $CONTAINER -s 2>/dev/null | tr -d '\n' | grep -q "RUNNING" && {
+        STATE="RUNNING"
+        CONTAINER_PID=$(sudo lxc-info -n $CONTAINER -p 2>/dev/null | grep -oP '\d+')
+        echo "  Running (PID $CONTAINER_PID)"
+        break
+    }
+    [ "$i" = "1" ] && (sudo lxc-info -n $CONTAINER -s 2>&1 | tr -d '\n' > /tmp/lxc_debug.txt; echo "EXIT:$?" >> /tmp/lxc_debug.txt)
+    echo "  Waiting for container... ($i/5)"
+    sleep 3
+done
+if [ "$STATE" != "RUNNING" ]; then
+    echo "  ERROR: Container failed to start"
+    exit 1
+fi
 
 echo ""
 echo "=== 2/5 修复容器设备节点 ==="
@@ -78,7 +95,26 @@ else
 fi
 
 echo ""
-echo "=== 5/5 启动 XFCE 桌面 ==="
+echo "=== 5/6 禁用不必要的 XFCE 组件 ==="
+sudo lxc-attach -n $CONTAINER -- su - phablet -c '
+mkdir -p ~/.config/autostart
+cd /etc/xdg/autostart
+for f in xfce4-notifyd.desktop xfce4-power-manager.desktop blueman-applet.desktop dnfdragora-updater.desktop tracker-miner-fs-3.desktop polkit-gnome-authentication-agent-1.desktop; do
+    [ -f "$f" ] && {
+        cp "$f" ~/.config/autostart/"$f"
+        echo "X-GNOME-Autostart-enabled=false" >> ~/.config/autostart/"$f"
+        echo "Hidden=true" >> ~/.config/autostart/"$f"
+    }
+done
+# 额外禁用 tracker 和 localsearch 服务
+systemctl --user disable tracker-miner-fs-3 2>/dev/null
+systemctl --user disable tracker-store 2>/dev/null
+pkill -f "localsearch|tracker" 2>/dev/null
+' 2>/dev/null
+echo "  Disabled: bluetooth, package updater, tracker, policykit agent"
+
+echo ""
+echo "=== 6/6 启动 XFCE 桌面 ==="
 sudo lxc-attach -n $CONTAINER -- env DISPLAY=:0 PULSE_SERVER=tcp:localhost:$PULSE_TCP_PORT su - phablet -c '
     echo "export PULSE_SERVER=tcp:localhost:'$PULSE_TCP_PORT'" >> ~/.bashrc
     DISPLAY=:0 startxfce4
