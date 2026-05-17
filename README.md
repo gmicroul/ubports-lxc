@@ -28,7 +28,7 @@
 
 ### 第 1 步：克隆仓库
 
-**宿主办行：**
+**在宿主执行：**
 
 ```bash
 cd ~
@@ -40,7 +40,7 @@ cd ubports-lxc
 
 ### 第 2 步：检查 LXC 环境
 
-**宿主办行：**
+**在宿主执行：**
 
 Ubuntu Touch 默认安装了 LXC 但配置有限制，需要先确认 LXC 可用：
 
@@ -93,7 +93,7 @@ sudo mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null || true
 
 ### 第 3 步：创建 LXC 容器
 
-**宿主办行：**
+**在宿主执行：**
 
 ```bash
 # 下载并创建 Fedora 42 容器
@@ -106,7 +106,7 @@ sudo lxc-create -n fedora42 -t download -- -d fedora -r 42 -a arm64
 
 ### 第 3 步：应用容器配置
 
-**宿主办行：**
+**在宿主执行：**
 
 ```bash
 # 复制容器配置（含 GPU、X11、PulseAudio 挂载）
@@ -160,7 +160,7 @@ exit
 
 ### 第 5 步：配置 Chromium 桌面菜单音频
 
-**宿主办行：**
+**在宿主执行：**
 
 ```bash
 sudo lxc-attach -n fedora42 -- sh -c 'cat > /usr/share/applications/chromium-browser.desktop << "DESKTOP"
@@ -194,7 +194,7 @@ DESKTOP'
 
 ### 第 6 步：配置 sudo 免密码
 
-**宿主办行：**
+**在宿主执行：**
 
 ```bash
 sudo visudo -f /etc/sudoers.d/fedora-desktop
@@ -210,7 +210,7 @@ phablet ALL=(ALL) NOPASSWD: /usr/bin/lxc-start, /usr/bin/lxc-info, /usr/bin/lxc-
 
 ### 第 7 步：安装桌面图标
 
-**宿主办行：**
+**在宿主执行：**
 
 ```bash
 cp ~/ubports-lxc/config/fedora42-desktop.desktop ~/.local/share/applications/
@@ -220,7 +220,7 @@ cp ~/ubports-lxc/config/fedora42-desktop.desktop ~/.local/share/applications/
 
 ### 第 8 步：安装 ALSA 音频转发配置
 
-**宿主办行：**
+**在宿主执行：**
 
 ```bash
 # 复制 asoundrc（ALSA → PulseAudio TCP 管道）
