@@ -38,7 +38,74 @@ cd ubports-lxc
 
 ---
 
-### 第 2 步：创建 LXC 容器
+### 第 2 步：检查 LXC 环境
+
+**宿主办行：**
+
+Ubuntu Touch 默认安装了 LXC 但配置有限制，需要先确认 LXC 可用：
+
+```bash
+# 测试 lxc 能否正常工作
+sudo lxc-checkconfig 2>/dev/null | head -20
+sudo lxc-info -n test -- daemon 2>/dev/null || echo "LXC daemon OK"
+```
+
+如果 `lxc-create` 报 `Permission denied` 或 AppArmor 错误，按以下修复：
+
+**2a. 确认 /etc/lxc/default.conf 内容：**
+
+```bash
+cat /etc/lxc/default.conf
+```
+
+如果缺少 namespace 或 apparmor 配置，写入标准配置：
+
+```bash
+sudo tee /etc/lxc/default.conf << "EOF"
+lxc.apparmor.profile = unconfined
+lxc.cgroup.devices.deny = a
+lxc.autodev = 0
+lxc.namespace.keep = net user
+EOF
+```
+
+**2b. 创建必要设备节点：**
+
+```bash
+sudo mknod -m 666 /dev/loop-control c 10 237 2>/dev/null
+sudo mknod -m 666 /dev/net/tun c 10 200 2>/dev/null
+```
+
+**2c. 确认 cgroup 已挂载：**
+
+```bash
+mount | grep cgroup | head -3
+```
+
+如果 cgroup2 没有挂载，手动挂载：
+
+```bash
+sudo mkdir -p /sys/fs/cgroup
+sudo mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null || true
+```
+
+---
+
+### 第 3 步：安装 AUFS 内核模块
+
+**宿主办行：**（解决 OverlayFS 兼容问题）
+
+```bash
+mkdir -p /var/lib/lxc/fedora42/aufs
+mknod /dev/aufs c 10 255 2>/dev/null
+```
+
+> 如果 `lxc-start` 报 `failed to mount`，参考常见问题第 7 条。
+> 部分 UT 内核不支持 OverlayFS，需改用 `dir` 存储后端。
+
+---
+
+### 第 4 步：创建 LXC 容器
 
 **宿主办行：**
 
@@ -258,7 +325,17 @@ cp ~/ubports-lxc/config/.asoundrc ~/
 **原因：** OverlayFS 与 UT 内核 4.9 兼容问题。
 **解决：** 修改容器配置，去掉 `lxc.rootfs.options` 行，或改用 `dir` 存储后端。
 
-### 4. Chromium 启动报 "profile locked"？
+### 4. lxc-create 报 "Permission denied" 或 AppArmor 错误？
+
+**原因：** UT 的 LXC 默认配置限制严格。
+**解决：** 按第 2 步配置 `/etc/lxc/default.conf`，设置 `apparmor.profile = unconfined` 和 `namespace.keep = net user`。
+
+### 5. "Failed to set process to user" 错误？
+
+**原因：** LXC 在独立 user namespace 中运行，宿主办无法访问容器内进程。
+**解决：** 这是正常行为，不影响容器运行。使用 `lxc-attach` 代替 `nsenter` 进入容器。
+
+### 6. Chromium 启动报 "profile locked"？
 
 ```bash
 sudo lxc-attach -n fedora42 -- su - phablet -c 'rm -f ~/.config/chromium/Singleton*'
