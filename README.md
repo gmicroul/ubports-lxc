@@ -91,21 +91,7 @@ sudo mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null || true
 
 ---
 
-### 第 3 步：安装 AUFS 内核模块
-
-**宿主办行：**（解决 OverlayFS 兼容问题）
-
-```bash
-mkdir -p /var/lib/lxc/fedora42/aufs
-mknod /dev/aufs c 10 255 2>/dev/null
-```
-
-> 如果 `lxc-start` 报 `failed to mount`，参考常见问题第 7 条。
-> 部分 UT 内核不支持 OverlayFS，需改用 `dir` 存储后端。
-
----
-
-### 第 4 步：创建 LXC 容器
+### 第 3 步：创建 LXC 容器
 
 **宿主办行：**
 
@@ -322,8 +308,8 @@ cp ~/ubports-lxc/config/.asoundrc ~/
 
 ### 3. 容器启动报 "failed to mount" 错误？
 
-**原因：** OverlayFS 与 UT 内核 4.9 兼容问题。
-**解决：** 修改容器配置，去掉 `lxc.rootfs.options` 行，或改用 `dir` 存储后端。
+**原因：** UT 内核 4.9 不支持 OverlayFS 或 AUFS。
+**解决：** 将容器配置中的 `lxc.rootfs.options` 改为 `dir` 存储后端，或参考第 2c 步手动挂载 cgroup2。
 
 ### 4. lxc-create 报 "Permission denied" 或 AppArmor 错误？
 
@@ -371,12 +357,44 @@ XFCE 窗口关闭后，下次点击桌面图标会重新启动。
 
 ### 7. XFCE 窗口太小 / 字体模糊？
 
-XFCE 启动脚本已配置 192 DPI（2x 缩放），适合 1080×2340 屏幕。
-如需调整，在容器内运行：
+启动脚本已配置 192 DPI（2x 缩放），适合 1080×2340 屏幕。
+如需调整，手动修改容器内的缩放配置文件：
 
 ```bash
-sudo lxc-attach -n fedora42 -- su - phablet -c 'DISPLAY=:0 xfce4-settings-manager'
+# 查看当前缩放配置
+sudo lxc-attach -n fedora42 -- cat /home/phablet/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml
+
+# 手动调整 DPI 和缩放因子
+sudo lxc-attach -n fedora42 -- su - phablet -c "cat > ~/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml << 'XML'
+<?xml version=\"1.1\" encoding=\"UTF-8\"?>
+<channel name=\"xsettings\" version=\"1.0\">
+  <property name=\"Net\" type=\"empty\">
+    <property name=\"ThemeName\" type=\"string\" value=\"Adwaita\"/>
+    <property name=\"IconThemeName\" type=\"string\" value=\"Adwaita\"/>
+  </property>
+  <property name=\"Xft\" type=\"empty\">
+    <property name=\"DPI\" type=\"int\" value=\"192\"/>
+    <property name=\"Hinting\" type=\"int\" value=\"1\"/>
+    <property name=\"HintStyle\" type=\"string\" value=\"hintslight\"/>
+    <property name=\"RGBA\" type=\"string\" value=\"rgb\"/>
+  </property>
+  <property name=\"Gtk\" type=\"empty\">
+    <property name=\"WindowScalingFactor\" type=\"int\" value=\"2\"/>
+    <property name=\"FontName\" type=\"string\" value=\"Sans 14\"/>
+    <property name=\"MonospaceFontName\" type=\"string\" value=\"Monospace 12\"/>
+    <property name=\"IconSizes\" type=\"string\" value=\"gtk-menu=32,gtk-button=32,gtk-large-toolbar=48\"/>
+  </property>
+</channel>
+XML"
+
+# 重启 XFCE 生效
+sudo lxc-attach -n fedora42 -- su - phablet -c 'DISPLAY=:0 xfce4-panel -r 2>/dev/null'
 ```
+
+DPI 值参考（1080×2340 屏幕）：
+- **192** = 2x 缩放（推荐，字体够大）
+- **144** = 1.5x 缩放（偏小）
+- **96** = 原生 1x（手机屏太小，不推荐）
 
 ---
 
