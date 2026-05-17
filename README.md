@@ -122,7 +122,7 @@ sudo chmod +x /var/lib/lxc/fedora42-wayland-hook.sh
 
 ### 第 4 步：创建 XFCE 桌面
 
-**宿主办行（进入容器）：**
+**进入容器执行：**
 
 ```bash
 sudo lxc-start -n fedora42 -d
@@ -304,7 +304,7 @@ cp ~/ubports-lxc/config/.asoundrc ~/
 
 ### 5. "Failed to set process to user" 错误？
 
-**原因：** LXC 在独立 user namespace 中运行，宿主办无法访问容器内进程。
+**原因：** LXC 在独立 user namespace 中运行，宿主无法访问容器内进程。
 **解决：** 这是正常行为，不影响容器运行。使用 `lxc-attach` 代替 `nsenter` 进入容器。
 
 ### 6. Chromium 启动报 "profile locked"？
