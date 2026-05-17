@@ -120,21 +120,7 @@ sudo chmod +x /var/lib/lxc/fedora42-wayland-hook.sh
 
 ---
 
-### 第 4 步：安装 AUFS 内核模块
-
-**宿主办行：**（解决 OverlayFS 兼容问题）
-
-```bash
-mkdir -p /var/lib/lxc/fedora42/aufs
-mknod /dev/aufs c 10 255 2>/dev/null
-```
-
-> 如果 `lxc-start` 报 `failed to mount`，可去掉容器配置中的 `lxc.rootfs.options` 行，
-> 或将 `overlay` 改为 `dir` 模式。
-
----
-
-### 第 5 步：创建 XFCE 桌面
+### 第 4 步：创建 XFCE 桌面
 
 **宿主办行（进入容器）：**
 
@@ -172,7 +158,7 @@ exit
 
 ---
 
-### 第 6 步：配置 Chromium 桌面菜单音频
+### 第 5 步：配置 Chromium 桌面菜单音频
 
 **宿主办行：**
 
@@ -206,7 +192,7 @@ DESKTOP'
 
 ---
 
-### 第 7 步：配置 sudo 免密码
+### 第 6 步：配置 sudo 免密码
 
 **宿主办行：**
 
@@ -222,7 +208,7 @@ phablet ALL=(ALL) NOPASSWD: /usr/bin/lxc-start, /usr/bin/lxc-info, /usr/bin/lxc-
 
 ---
 
-### 第 8 步：安装桌面图标
+### 第 7 步：安装桌面图标
 
 **宿主办行：**
 
@@ -232,7 +218,7 @@ cp ~/ubports-lxc/config/fedora42-desktop.desktop ~/.local/share/applications/
 
 ---
 
-### 第 9 步：安装 ALSA 音频转发配置
+### 第 8 步：安装 ALSA 音频转发配置
 
 **宿主办行：**
 
@@ -243,7 +229,7 @@ cp ~/ubports-lxc/config/.asoundrc ~/
 
 ---
 
-### 第 10 步：重启手机
+### 第 9 步：重启手机
 
 重启后，在 Lomiri 桌面底部上划 → 应用抽屉 → 找到 **Fedora 42 桌面** 图标 → 点击即可进入 XFCE。
 
