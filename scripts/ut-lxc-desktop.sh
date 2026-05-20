@@ -15,6 +15,10 @@ DEFAULT_UID="32011"
 DEFAULT_DESKTOP="xfce"
 DEFAULT_PORT="32016"
 DEFAULT_DISPLAY=":0"
+NESTED_DISPLAY=":20"
+NESTED_GEOMETRY="${UT_LXC_NESTED_GEOMETRY:-1280x720}"
+NESTED_DPI="${UT_LXC_NESTED_DPI:-168}"
+NESTED_FULLSCREEN="${UT_LXC_NESTED_FULLSCREEN:-1}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CACHE_DIR="/home/phablet/.cache/ubports-lxc"
 LOG_DIR="$CACHE_DIR/logs"
@@ -28,6 +32,8 @@ CONTAINER_USER="${UT_LXC_USER:-$DEFAULT_USER}"
 CONTAINER_UID="${UT_LXC_UID:-$DEFAULT_UID}"
 PULSE_TCP_PORT="${UT_LXC_PULSE_PORT:-$DEFAULT_PORT}"
 DISPLAY_NUM="${UT_LXC_DISPLAY:-$DEFAULT_DISPLAY}"
+DISPLAY_MODE="${UT_LXC_DISPLAY_MODE:-direct}"
+if [ "$DISPLAY_MODE" = "xephyr" ] && [ "$DISPLAY_NUM" = "$DEFAULT_DISPLAY" ]; then DISPLAY_NUM="$NESTED_DISPLAY"; fi
 ROOTFS_BASE="/var/lib/lxc"
 
 usage() {
@@ -59,6 +65,11 @@ Options:
   --desktop NAME         xfce currently supported (default: xfce)
   --port PORT            PulseAudio relay TCP port (default: $DEFAULT_PORT)
   --display DISPLAY      X11 display (default: $DEFAULT_DISPLAY)
+  --display-mode MODE    direct|xephyr (default: direct)
+  --nested               Shortcut for --display-mode xephyr
+  --nested-size WxH      Xephyr screen size (default: $NESTED_GEOMETRY)
+  --nested-dpi DPI       Xephyr DPI (default: $NESTED_DPI)
+  --nested-fullscreen 0|1 Xephyr fullscreen hint (default: $NESTED_FULLSCREEN)
   -h, --help             Show this help
 EOF
 }
@@ -82,6 +93,7 @@ container_rootfs() { printf '%s/%s/rootfs' "$ROOTFS_BASE" "$CONTAINER"; }
 container_config() { printf '%s/%s/config' "$ROOTFS_BASE" "$CONTAINER"; }
 hook_path() { printf '%s/%s/ut-desktop-hook.sh' "$ROOTFS_BASE" "$CONTAINER"; }
 pidfile() { printf '/tmp/ut-lxc-pulse-%s-%s.pid' "$CONTAINER" "$PULSE_TCP_PORT"; }
+xephyr_pidfile() { printf '/tmp/ut-lxc-xephyr-%s.pid' "$CONTAINER"; }
 
 normalize_arch() { [ "$ARCH" = "aarch64" ] && ARCH="arm64"; }
 
@@ -100,6 +112,11 @@ parse_args() {
             --desktop) DESKTOP="$2"; shift 2 ;;
             --port) PULSE_TCP_PORT="$2"; shift 2 ;;
             --display) DISPLAY_NUM="$2"; shift 2 ;;
+            --display-mode) DISPLAY_MODE="$2"; [ "$DISPLAY_MODE" = "xephyr" ] && [ "$DISPLAY_NUM" = "$DEFAULT_DISPLAY" ] && DISPLAY_NUM="$NESTED_DISPLAY"; shift 2 ;;
+            --nested) DISPLAY_MODE="xephyr"; [ "$DISPLAY_NUM" = "$DEFAULT_DISPLAY" ] && DISPLAY_NUM="$NESTED_DISPLAY"; shift ;;
+            --nested-size) NESTED_GEOMETRY="$2"; shift 2 ;;
+            --nested-dpi) NESTED_DPI="$2"; shift 2 ;;
+            --nested-fullscreen) NESTED_FULLSCREEN="$2"; shift 2 ;;
             -h|--help) usage; exit 0 ;;
             *) fail "Unknown option: $1" ;;
         esac
@@ -141,7 +158,9 @@ UT_UID="__UID__"
 HOST_X11="/tmp/.X11-unix"
 HOST_WAYLAND="/run/user/${UT_UID}/wayland-0"
 HOST_WAYLAND_LOCK="/run/user/${UT_UID}/wayland-0.lock"
-HOST_DBUS="/run/dbus/system_bus_socket"
+# Do not expose the host system bus into containers.
+# Exposing /run/dbus/system_bus_socket lets desktop applets inside the container
+# talk to host NetworkManager/UPower/logind and can break WiFi on Ubuntu Touch.
 make_dev_nodes() {
   mkdir -p "${ROOTFS}/dev"
   rm -f "${ROOTFS}/dev/null" "${ROOTFS}/dev/zero" "${ROOTFS}/dev/random" "${ROOTFS}/dev/urandom"
@@ -164,10 +183,7 @@ case "${1:-}" in
     [ -e "${HOST_WAYLAND}" ] && cp -a "${HOST_WAYLAND}" "${ROOTFS}/run/user/${UT_UID}/wayland-0" 2>/dev/null || true
     [ -e "${HOST_WAYLAND_LOCK}" ] && cp -a "${HOST_WAYLAND_LOCK}" "${ROOTFS}/run/user/${UT_UID}/wayland-0.lock" 2>/dev/null || true
     chmod 777 "${ROOTFS}/run/user/${UT_UID}" "${ROOTFS}/run/user/${UT_UID}/wayland-0" "${ROOTFS}/run/user/${UT_UID}/wayland-0.lock" 2>/dev/null || true
-    mkdir -p "${ROOTFS}/run/dbus"
     rm -f "${ROOTFS}/run/dbus/system_bus_socket"
-    [ -e "${HOST_DBUS}" ] && cp -a "${HOST_DBUS}" "${ROOTFS}/run/dbus/system_bus_socket" 2>/dev/null || true
-    chmod 777 "${ROOTFS}/run/dbus/system_bus_socket" 2>/dev/null || true
     make_dev_nodes
     ;;
   post-stop)
@@ -204,9 +220,14 @@ lxc.pty.max = 1024
 lxc.idmap = u 0 0 65536
 lxc.idmap = g 0 0 65536
 lxc.apparmor.profile = unconfined
-lxc.cap.drop = mac_admin mac_override
+lxc.cap.drop = mac_admin mac_override net_admin net_raw
 lxc.autodev = 0
 lxc.cgroup2.devices.deny = a
+# GPU/display devices on Ubuntu Touch / Snapdragon 845:
+# - 226:* = DRM/KMS display nodes (/dev/dri/*)
+# - 237:* = KGSL Adreno GPU node (/dev/kgsl-3d0)
+lxc.cgroup2.devices.allow = c 226:* rwm
+lxc.cgroup2.devices.allow = c 237:* rwm
 lxc.hook.pre-start = $(hook_path) pre-start
 lxc.hook.post-stop = $(hook_path) post-stop
 lxc.mount.entry = proc proc proc nodev,noexec,nosuid 0 0
@@ -220,8 +241,14 @@ lxc.mount.entry = dev/pts dev/pts devpts gid=5,mode=620,create=dir 0 0
 lxc.mount.entry = dev/shm dev/shm tmpfs nosuid,nodev,create=dir 0 0
 lxc.mount.entry = dev/mqueue dev/mqueue mqueue nodev,nosuid,noexec,create=dir 0 0
 lxc.mount.entry = /dev/dri dev/dri none bind,create=dir,optional 0 0
+lxc.mount.entry = /dev/kgsl-3d0 dev/kgsl-3d0 none bind,create=file,optional 0 0
 lxc.mount.entry = /dev/input dev/input none bind,create=dir,optional 0 0
 lxc.mount.entry = /sys/devices/system/cpu sys/devices/system/cpu none bind,ro,create=dir,optional 0 0
+lxc.mount.entry = /sys/class/drm sys/class/drm none bind,ro,create=dir,optional 0 0
+lxc.mount.entry = /sys/dev/char sys/dev/char none bind,ro,create=dir,optional 0 0
+lxc.mount.entry = /sys/devices/platform/soc/ae00000.qcom,mdss_mdp sys/devices/platform/soc/ae00000.qcom,mdss_mdp none bind,ro,create=dir,optional 0 0
+lxc.mount.entry = /sys/devices/platform/soc/5000000.qcom,kgsl-3d0 sys/devices/platform/soc/5000000.qcom,kgsl-3d0 none bind,ro,create=dir,optional 0 0
+lxc.mount.entry = /sys/kernel/gpu sys/kernel/gpu none bind,ro,create=dir,optional 0 0
 lxc.mount.entry = $REPO_DIR ubuntu none bind,ro,create=dir,optional 0 0
 EOF
     log "Installed config: $cfg"
@@ -250,6 +277,7 @@ mknod -m 666 /dev/zero c 1 5
 mknod -m 666 /dev/random c 1 8
 mknod -m 666 /dev/urandom c 1 9
 chmod 666 /dev/null /dev/zero /dev/random /dev/urandom
+chmod 666 /dev/dri/card0 /dev/dri/renderD128 /dev/dri/controlD64 /dev/kgsl-3d0 2>/dev/null || true
 ' 2>/dev/null || true
     local pid
     pid="$(get_container_pid)"
@@ -261,6 +289,7 @@ mknod -m 666 /dev/zero c 1 5
 mknod -m 666 /dev/random c 1 8
 mknod -m 666 /dev/urandom c 1 9
 chmod 666 /dev/null /dev/zero /dev/random /dev/urandom
+chmod 666 /dev/dri/card0 /dev/dri/renderD128 /dev/dri/controlD64 /dev/kgsl-3d0 2>/dev/null || true
 ' 2>/dev/null || true
     fi
 }
@@ -268,10 +297,10 @@ chmod 666 /dev/null /dev/zero /dev/random /dev/urandom
 pkg_install_cmd() {
     case "$DISTRO" in
         fedora)
-            printf 'dnf install -y --nogpgcheck @xfce-desktop chromium pulseaudio-libs pulseaudio-utils alsa-plugins-pulseaudio dbus-x11 xterm'
+            printf 'dnf install -y --nogpgcheck @xfce-desktop chromium pulseaudio-libs pulseaudio-utils alsa-plugins-pulseaudio dbus-x11 xterm mesa-dri-drivers mesa-libEGL mesa-libGL mesa-vulkan-drivers mesa-va-drivers libdrm glx-utils mesa-demos kmscube'
             ;;
         ubuntu|debian)
-            printf 'export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y --no-install-recommends xfce4 xfce4-terminal dbus-x11 pulseaudio-utils alsa-utils libasound2-plugins xterm'
+            printf 'export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y --no-install-recommends xfce4 xfce4-terminal dbus-x11 pulseaudio-utils alsa-utils libasound2-plugins xterm libgl1 libgl1-mesa-dri libegl1 libgles2 libdrm2 mesa-utils mesa-utils-extra kmscube'
             ;;
         *) fail "Unsupported distro for install: $DISTRO. Supported: fedora, ubuntu, debian" ;;
     esac
@@ -344,16 +373,30 @@ install_xfce_config() {
 }
 
 disable_xfce_services() {
+    run_root lxc-attach -n "$CONTAINER" -- sh -lc '
+set +e
+for svc in NetworkManager NetworkManager-dispatcher NetworkManager-wait-online wpa_supplicant iwd ModemManager; do
+    systemctl disable --now "$svc" 2>/dev/null || true
+    systemctl mask "$svc" 2>/dev/null || true
+done
+pkill -9 -f "NetworkManager|wpa_supplicant|iwd|nm-applet|nm-tray|nm-connection-editor|ModemManager" 2>/dev/null || true
+' 2>/dev/null || true
     run_root lxc-attach -n "$CONTAINER" -- su - "$CONTAINER_USER" -c '
 mkdir -p ~/.config/autostart
-cd /etc/xdg/autostart 2>/dev/null || exit 0
-for f in xfce4-notifyd.desktop xfce4-power-manager.desktop blueman-applet.desktop dnfdragora-updater.desktop tracker-miner-fs-3.desktop tracker-store.desktop localsearch-3.desktop polkit-gnome-authentication-agent-1.desktop light-locker.desktop nm-applet.desktop; do
-    [ -f "$f" ] || continue
-    cp "$f" ~/.config/autostart/"$f"
-    grep -q "^Hidden=true" ~/.config/autostart/"$f" || echo "Hidden=true" >> ~/.config/autostart/"$f"
+for dir in /etc/xdg/autostart /usr/share/xdg/autostart; do
+  cd "$dir" 2>/dev/null || continue
+  for f in xfce4-notifyd.desktop xfce4-power-manager.desktop blueman-applet.desktop dnfdragora-updater.desktop tracker-miner-fs-3.desktop tracker-store.desktop localsearch-3.desktop polkit-gnome-authentication-agent-1.desktop polkit-kde-authentication-agent-1.desktop light-locker.desktop nm-applet.desktop nm-connection-editor.desktop nm-tray.desktop NetworkManager-applet.desktop gnome-keyring-pkcs11.desktop gnome-keyring-secrets.desktop gnome-keyring-ssh.desktop; do
+      [ -f "$f" ] || continue
+      cp "$f" ~/.config/autostart/"$f"
+      grep -q "^Hidden=true" ~/.config/autostart/"$f" || echo "Hidden=true" >> ~/.config/autostart/"$f"
+  done
+done
+# Also create blocker desktop files for common network applets even when packages use distro-specific paths.
+for f in nm-applet.desktop nm-connection-editor.desktop nm-tray.desktop NetworkManager-applet.desktop; do
+  printf "[Desktop Entry]\nType=Application\nName=Disabled %s\nHidden=true\n" "$f" > ~/.config/autostart/"$f"
 done
 systemctl --user disable tracker-miner-fs-3 tracker-store localsearch-3 2>/dev/null || true
-pkill -f "localsearch|tracker" 2>/dev/null || true
+pkill -9 -f "localsearch|tracker|nm-applet|nm-tray|polkit.*authentication" 2>/dev/null || true
 ' 2>/dev/null || true
 }
 
@@ -410,6 +453,39 @@ start_socat_relay() {
     if ss -tlnp 2>/dev/null | grep -q ":$PULSE_TCP_PORT "; then log "PulseAudio relay listening: tcp:0.0.0.0:$PULSE_TCP_PORT -> $sock"; else warn "PulseAudio relay not listening on $PULSE_TCP_PORT"; fi
 }
 
+stop_xephyr() {
+    local pf pid display_id
+    pf="$(xephyr_pidfile)"
+    display_id="${DISPLAY_NUM#:}"
+    if [ -f "$pf" ]; then
+        pid="$(cat "$pf" 2>/dev/null || true)"
+        [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
+        rm -f "$pf"
+    fi
+    pkill -9 -f "Xephyr $DISPLAY_NUM" 2>/dev/null || true
+    rm -f "/tmp/.X${display_id}-lock" "/tmp/.X11-unix/X${display_id}" 2>/dev/null || true
+}
+
+start_xephyr() {
+    have Xephyr || fail "Xephyr not found. Install with: sudo apt-get install xserver-xephyr"
+    local fullscreen_arg="" display_id pid
+    display_id="${DISPLAY_NUM#:}"
+    pid="$(pgrep -f "Xephyr $DISPLAY_NUM" | head -1 || true)"
+    if [ -n "$pid" ] && [ -S "/tmp/.X11-unix/X${display_id}" ]; then
+        echo "$pid" > "$(xephyr_pidfile)"
+        log "Xephyr nested display already running on $DISPLAY_NUM pid=$pid"
+        return 0
+    fi
+    stop_xephyr
+    [ "$NESTED_FULLSCREEN" = "1" ] && fullscreen_arg="-fullscreen"
+    setsid sudo -u phablet env DISPLAY=:0 XDG_RUNTIME_DIR="/run/user/$CONTAINER_UID" Xephyr "$DISPLAY_NUM" -screen "$NESTED_GEOMETRY" $fullscreen_arg -resizeable -ac -br -dpi "$NESTED_DPI" -retro </dev/null >/tmp/ut-lxc-xephyr-$CONTAINER.log 2>&1 &
+    sleep 3
+    pid="$(pgrep -f "Xephyr $DISPLAY_NUM" | head -1 || true)"
+    [ -n "$pid" ] && echo "$pid" > "$(xephyr_pidfile)"
+    [ -S "/tmp/.X11-unix/X${display_id}" ] || warn "Xephyr socket not ready: /tmp/.X11-unix/X${display_id}. Log: /tmp/ut-lxc-xephyr-$CONTAINER.log"
+    log "Xephyr nested display listening on $DISPLAY_NUM size=$NESTED_GEOMETRY dpi=$NESTED_DPI fullscreen=$NESTED_FULLSCREEN pid=${pid:-unknown}"
+}
+
 cmd_start() {
     need_root_for start
     mkdir -p "$LOG_DIR"
@@ -421,18 +497,55 @@ cmd_start() {
     run_root lxc-start -n "$CONTAINER" -d 2>/dev/null || true
     wait_running || fail "Container did not reach RUNNING. Check /tmp/$CONTAINER.log"
     fix_dev_nodes
+    if [ "$DISPLAY_MODE" = "xephyr" ]; then
+        start_xephyr
+        DISPLAY_FOR_CONTAINER="$DISPLAY_NUM"
+    else
+        DISPLAY_FOR_CONTAINER="$DISPLAY_NUM"
+    fi
     start_socat_relay
     setup_audio_env
     disable_xfce_services
-    log "Launching XFCE in $CONTAINER on DISPLAY=$DISPLAY_NUM"
     local xfce_log="$LOG_DIR/$CONTAINER-xfce.log"
+    if run_root lxc-attach -n "$CONTAINER" -- sh -lc "pgrep -u '$CONTAINER_USER' -x xfce4-session >/dev/null 2>&1" 2>/dev/null; then
+        log "XFCE already running in $CONTAINER on DISPLAY=$DISPLAY_FOR_CONTAINER"
+        run_root lxc-attach -n "$CONTAINER" -- su - "$CONTAINER_USER" -c "
+export DISPLAY=$DISPLAY_FOR_CONTAINER
+export GDK_SCALE=1
+export GDK_DPI_SCALE=1
+export QT_SCALE_FACTOR=1
+if ! pgrep -u '$CONTAINER_USER' -x xfwm4 >/dev/null 2>&1; then xfwm4 --replace --sm-client-disable >/tmp/xfwm4-recover.log 2>&1 & fi
+if ! pgrep -u '$CONTAINER_USER' -x xfsettingsd >/dev/null 2>&1; then xfsettingsd --replace >/tmp/xfsettingsd-recover.log 2>&1 & fi
+" >/dev/null 2>&1 || true
+        return 0
+    fi
+    log "Launching XFCE in $CONTAINER on DISPLAY=$DISPLAY_FOR_CONTAINER"
     rm -f "$xfce_log"
     install -o phablet -g phablet -m 664 /dev/null "$xfce_log" 2>/dev/null || { : > "$xfce_log"; chown phablet:phablet "$xfce_log" 2>/dev/null || true; chmod 664 "$xfce_log" 2>/dev/null || true; }
-    run_root lxc-attach -n "$CONTAINER" -- env DISPLAY="$DISPLAY_NUM" PULSE_SERVER="tcp:localhost:$PULSE_TCP_PORT" su - "$CONTAINER_USER" -c "
-export DISPLAY=$DISPLAY_NUM
+    run_root lxc-attach -n "$CONTAINER" -- sh -lc "pkill -9 -u '$CONTAINER_USER' -f 'xfce4-session|startxfce4|xfwm4|xfdesktop|xfsettingsd|xfce4-panel|plank|dock' 2>/dev/null || true" 2>/dev/null || true
+    rm -f "$xfce_log"
+    touch "$xfce_log"
+    chown phablet:phablet "$xfce_log" 2>/dev/null || true
+    chmod 664 "$xfce_log" 2>/dev/null || true
+    setsid bash -c 'if [ "$(id -u)" = "0" ]; then exec "$@"; else exec sudo "$@"; fi' _ lxc-attach -n "$CONTAINER" -- su - "$CONTAINER_USER" -c "
+export DISPLAY=$DISPLAY_FOR_CONTAINER
 export PULSE_SERVER=tcp:localhost:$PULSE_TCP_PORT
+export GDK_SCALE=1
+export GDK_DPI_SCALE=1
+export QT_SCALE_FACTOR=1
 rm -rf ~/.cache/sessions/xfce4* ~/.config/xfce4/sessions 2>/dev/null || true
-startxfce4
+xfconf-query -c xsettings -p /Xft/DPI -s 168 2>/dev/null || true
+xfconf-query -c xsettings -p /Gtk/FontName -s 'Sans 16' 2>/dev/null || true
+xfconf-query -c xsettings -p /Gtk/MonospaceFontName -s 'Monospace 15' 2>/dev/null || true
+xfconf-query -c xsettings -p /Gtk/WindowScalingFactor -s 1 2>/dev/null || true
+xfconf-query -c xfwm4 -p /general/title_font -s 'Sans Bold 15' 2>/dev/null || true
+xfconf-query -c xfwm4 -p /general/border_width -s 4 2>/dev/null || true
+startxfce4 &
+sleep 5
+xfsettingsd --replace >/dev/null 2>&1 &
+xfwm4 --replace --sm-client-disable >/dev/null 2>&1 &
+xfdesktop --reload >/dev/null 2>&1 || true
+wait
 " > "$xfce_log" 2>&1 &
     log "XFCE launch requested. Log: $xfce_log"
 }
@@ -446,6 +559,14 @@ cmd_doctor() {
     if run_root lxc-info -n "$CONTAINER" -s 2>/dev/null | tr -d '\n' | grep -q RUNNING; then log "OK container RUNNING"; pid="$(get_container_pid)"; log "OK container PID: ${pid:-unknown}"; else warn "container not RUNNING"; ok=1; fi
     [ -e /tmp/.X11-unix/X0 ] && log "OK host X11 socket exists" || { warn "host X11 socket missing: /tmp/.X11-unix/X0"; ok=1; }
     [ -S "/run/user/$CONTAINER_UID/pulse/native" ] && log "OK host PulseAudio socket exists" || warn "host PulseAudio socket missing"
+    if [ "$DISPLAY_MODE" = "xephyr" ]; then
+        if pgrep -f "Xephyr $DISPLAY_NUM" >/dev/null 2>&1 && [ -S "/tmp/.X11-unix/X${DISPLAY_NUM#:}" ]; then
+            log "OK Xephyr nested display running: $DISPLAY_NUM"
+        else
+            warn "Xephyr nested display not running: $DISPLAY_NUM"
+            ok=1
+        fi
+    fi
     if ss -tlnp 2>/dev/null | grep -q ":$PULSE_TCP_PORT "; then log "OK port $PULSE_TCP_PORT listening"; else warn "port $PULSE_TCP_PORT not listening"; fi
     if run_root lxc-attach -n "$CONTAINER" -- id "$CONTAINER_USER" >/dev/null 2>&1; then log "OK container user exists"; else warn "container user missing"; ok=1; fi
     if run_root lxc-attach -n "$CONTAINER" -- sh -lc '[ -c /dev/null ] && [ -c /dev/zero ]' >/dev/null 2>&1; then log "OK device nodes"; else warn "device nodes broken"; ok=1; fi
@@ -538,7 +659,7 @@ mkdir -p "$LOG_DIR"
 log="$LOG_DIR/$CONTAINER-launcher.log"
 rm -f "\$log"
 {
-  sudo -n "$REPO_DIR/scripts/ut-lxc-desktop.sh" start -n "$CONTAINER" -u "$CONTAINER_USER" --uid "$CONTAINER_UID" --port "$PULSE_TCP_PORT" 2>&1
+  sudo -n "$REPO_DIR/scripts/ut-lxc-desktop.sh" start -n "$CONTAINER" -u "$CONTAINER_USER" --uid "$CONTAINER_UID" --port "$PULSE_TCP_PORT" --display-mode "$DISPLAY_MODE" --display "$DISPLAY_NUM" 2>&1
 } | tee "\$log"
 EOF
     chmod 755 "$wrapper"

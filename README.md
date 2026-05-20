@@ -115,6 +115,14 @@ sudo scripts/ut-lxc-desktop.sh all -n debian-trixie -d debian -r trixie
 /home/phablet/ubports-lxc/scripts/ut-lxc-desktop.sh start -n fedora42
 ```
 
+嵌套单窗口模式，也就是整个 XFCE 桌面包在一个 Xephyr 窗口里：
+
+```bash
+sudo /home/phablet/ubports-lxc/scripts/ut-lxc-desktop.sh start -n ubuntu24 -d ubuntu -r noble --nested
+```
+
+`--nested` 等价于 `--display-mode xephyr`，默认使用容器显示号 `:20`。这种模式下 Lomiri 只看到一个 Xephyr 窗口，XFCE 里的终端、文件管理器、浏览器都留在这个窗口内部。
+
 或者点 Lomiri 应用抽屉里的：
 
 ```text
@@ -185,7 +193,9 @@ all           create + configure + install + sudoers + desktop-file
 --uid UID              容器内桌面用户 uid/gid，默认 32011
 --desktop NAME         当前支持 xfce
 --port PORT            PulseAudio 转发端口，默认 32016
---display DISPLAY      X11 display，默认 :0
+--display DISPLAY      X11 display，direct 默认 :0，xephyr 默认 :20
+--display-mode MODE    direct|xephyr
+--nested               等价于 --display-mode xephyr
 ```
 
 ---
@@ -213,6 +223,8 @@ config/start-fedora-desktop.sh
 ## 架构
 
 ```text
+direct 模式：
+
 容器应用
   ↓
 DISPLAY=:0 / X11 socket
@@ -220,6 +232,16 @@ DISPLAY=:0 / X11 socket
 /tmp/.X11-unix/X0 copied by hook
   ↓
 Lomiri/XWayland/X server
+
+xephyr / nested 模式：
+
+容器 XFCE 整个桌面
+  ↓
+DISPLAY=:20 / X20 socket
+  ↓
+宿主 Xephyr 窗口
+  ↓
+Lomiri 里的单个窗口
 
 容器应用音频
   ↓
