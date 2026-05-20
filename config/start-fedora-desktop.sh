@@ -1,6 +1,11 @@
-#!/bin/bash
-# Fedora 42 容器桌面启动器（供 UT 桌面图标调用）
-# 无需密码（已配 sudoers NOPASSWD）
-
-# 执行启动脚本
-bash /home/phablet/start-xfce.sh
+#!/usr/bin/env bash
+# Legacy Fedora 42 launcher. Keep this file for old .desktop entries, but run the generic manager.
+set -u
+LOG_DIR="/home/phablet/.cache/ubports-lxc/logs"
+SCRIPT="/home/phablet/ubports-lxc/scripts/ut-lxc-desktop.sh"
+mkdir -p "$LOG_DIR"
+log="$LOG_DIR/fedora42-launcher.log"
+rm -f "$log"
+{
+  sudo -n "$SCRIPT" start -n fedora42 -d fedora -r 42 2>&1
+} | tee "$log"

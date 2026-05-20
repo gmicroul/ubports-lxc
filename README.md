@@ -1,387 +1,369 @@
-# Ubuntu Touch + Fedora 42 XFCE 桌面嵌入方案
+# Ubuntu Touch 通用 LXC 桌面容器方案
 
-> 在 **Ubuntu Touch 26.04 (OnePlus 6T)** 上，通过 LXC 容器运行 Fedora 42，
-> 将 XFCE 桌面嵌入到 Lomiri 桌面窗口中，支持音频输出到手机扬声器。
->
-> 最终效果：桌面有一个 "Fedora 42 桌面" 图标，点击即进入 XFCE。
+在 Ubuntu Touch 26.04 / OnePlus 6T 上，用一个通用脚本创建、安装、启动和自检 LXC 桌面容器。
 
----
-
-## 目录
-
-- [从零开始部署](#从零开始部署)
-- [容器配置说明](#容器配置说明)
-- [一键启动脚本](#一键启动脚本)
-- [常见问题](#常见问题)
-
----
-
-## 从零开始部署
-
-### 前提条件
-
-- Ubuntu Touch 26.04 (arm64)
-- 已 root 或拥有 sudo 权限
-- 手机已连接 Wi-Fi
-
----
-
-### 第 1 步：克隆仓库
-
-**在宿主执行：**
+统一入口：
 
 ```bash
-cd ~
-git clone https://github.com/gmicroul/ubports-lxc.git
-cd ubports-lxc
+/home/phablet/ubports-lxc/scripts/ut-lxc-desktop.sh
+```
+
+目标很简单：不再只围绕 fedora42。现在 Fedora、Ubuntu、Debian 都走同一条链路，自动生成 config、hook、XFCE 配置、音频转发、桌面图标和自检逻辑。
+
+当前支持：
+
+- Fedora 42 + XFCE
+- Ubuntu noble + XFCE
+- Debian trixie/bookworm + XFCE
+- Lomiri 内嵌 X11/XFCE 桌面
+- PulseAudio 通过 socat TCP:32016 转发
+- 自动生成 LXC config
+- 自动生成容器 hook
+- 自动创建容器内 phablet 用户 uid=32011
+- 自动部署 XFCE 2x 缩放配置
+- 自动安装 Lomiri 应用抽屉图标
+- doctor 自检
+
+---
+
+## 一次性 bootstrap：以后直接用 lxc-create
+
+先执行一次：
+
+```bash
+cd /home/phablet/ubports-lxc
+sudo scripts/ut-lxc-desktop.sh bootstrap
+```
+
+bootstrap 会安装：
+
+- `/usr/local/bin/lxc-create` wrapper
+- `/etc/sudoers.d/ubports-lxc-desktop`
+
+以后直接用系统习惯的 `lxc-create`：
+
+```bash
+sudo lxc-create -n ubuntu-noble -t download -- -d ubuntu -r noble -a arm64
+```
+
+创建完成后 wrapper 会自动对 Fedora/Ubuntu/Debian download 容器执行：
+
+```bash
+scripts/ut-lxc-desktop.sh configure -n <容器名> -d <发行版> -r <版本>
+```
+
+也就是自动写入 UT 兼容 LXC config、hook 和设备节点。之后如果要装桌面，执行：
+
+```bash
+sudo scripts/ut-lxc-desktop.sh install -n ubuntu-noble -d ubuntu -r noble
+sudo scripts/ut-lxc-desktop.sh desktop-file -n ubuntu-noble -d ubuntu -r noble
+```
+
+如果你想 `lxc-create` 后直接连 XFCE 也装好，用 wrapper 自带开关：
+
+```bash
+sudo lxc-create --ut-install -n ubuntu-noble -t download -- -d ubuntu -r noble -a arm64
 ```
 
 ---
 
-### 第 2 步：检查 LXC 环境
+## 兼容旧流程：一条命令创建并安装桌面
 
-**在宿主执行：**
-
-Ubuntu Touch 默认安装了 LXC 但配置有限制，需要先确认 LXC 可用：
+### Fedora 42
 
 ```bash
-# 测试 lxc 能否正常工作
-sudo lxc-checkconfig 2>/dev/null | head -20
-sudo lxc-info -n test -- daemon 2>/dev/null || echo "LXC daemon OK"
+cd /home/phablet/ubports-lxc
+sudo scripts/ut-lxc-desktop.sh all -n fedora42 -d fedora -r 42
 ```
 
-如果 `lxc-create` 报 `Permission denied` 或 AppArmor 错误，按以下修复：
-
-**2a. 确认 /etc/lxc/default.conf 内容：**
+### Ubuntu Noble
 
 ```bash
-cat /etc/lxc/default.conf
+cd /home/phablet/ubports-lxc
+sudo scripts/ut-lxc-desktop.sh all -n ubuntu-noble -d ubuntu -r noble
 ```
 
-如果缺少 namespace 或 apparmor 配置，写入标准配置：
+### Debian Trixie
 
 ```bash
-sudo tee /etc/lxc/default.conf << "EOF"
+cd /home/phablet/ubports-lxc
+sudo scripts/ut-lxc-desktop.sh all -n debian-trixie -d debian -r trixie
+```
+
+执行 `all` 会自动做：
+
+1. `lxc-create` 创建容器
+2. 写入 UT 兼容 LXC config
+3. 写入容器启动 hook
+4. 安装桌面包和工具
+5. 创建容器内 `phablet` 用户
+6. 部署 XFCE 手机缩放配置
+7. 禁用不适合手机容器的 XFCE 后台服务
+8. 写入音频环境变量和 Chromium 配置
+9. 安装 sudoers 免密规则
+10. 安装 Lomiri 桌面图标
+
+---
+
+## 启动容器桌面
+
+现在桌面入口会用 `sudo -n` 调起通用管理器，避免点图标时被 sudo 认证卡住。
+
+命令行启动：
+
+```bash
+/home/phablet/ubports-lxc/scripts/ut-lxc-desktop.sh start -n fedora42
+```
+
+或者点 Lomiri 应用抽屉里的：
+
+```text
+fedora42 桌面
+ubuntu-noble 桌面
+```
+
+日志位置：
+
+```text
+/home/phablet/.cache/ubports-lxc/logs/<容器名>-launcher.log
+/home/phablet/.cache/ubports-lxc/logs/<容器名>-xfce.log
+```
+
+---
+
+## 自检
+
+```bash
+/home/phablet/ubports-lxc/scripts/ut-lxc-desktop.sh doctor -n fedora42
+```
+
+doctor 会检查：
+
+- 容器目录是否存在
+- LXC config 是否存在
+- hook 是否可执行
+- 容器是否 RUNNING
+- `/tmp/.X11-unix/X0` 是否存在
+- `/run/user/32011/pulse/native` 是否存在
+- TCP:32016 是否监听
+- 容器内 `phablet` 用户是否存在
+- 容器内 `/dev/null`、`/dev/zero` 是否正常
+- 容器内 `xfce4-session` / `startxfce4` 是否在跑
+- 容器内 `pactl info` 是否能连到 PulseAudio
+
+---
+
+## 通用脚本命令
+
+```bash
+scripts/ut-lxc-desktop.sh COMMAND [options]
+```
+
+命令：
+
+```text
+create        创建 LXC 容器
+configure     生成/安装 UT 兼容 LXC config 和 hook
+install       在容器内安装桌面、用户、音频、配置
+repair        修复 /dev 节点并补完中断配置
+sudoers       安装 NOPASSWD sudoers 规则
+bootstrap     安装 lxc-create wrapper，以后 lxc-create 后自动 configure
+start         启动容器、启动音频转发、启动 XFCE
+doctor        检查宿主/容器/显示/音频状态
+desktop-file  安装 Lomiri 应用抽屉图标
+all           create + configure + install + sudoers + desktop-file
+```
+
+常用参数：
+
+```text
+-n, --name NAME        容器名，例如 fedora42、ubuntu-noble
+-d, --distro DISTRO    fedora|ubuntu|debian
+-r, --release RELEASE  发行版版本，例如 42、noble、trixie
+-a, --arch ARCH        arm64/aarch64
+-u, --user USER        容器内桌面用户，默认 phablet
+--uid UID              容器内桌面用户 uid/gid，默认 32011
+--desktop NAME         当前支持 xfce
+--port PORT            PulseAudio 转发端口，默认 32016
+--display DISPLAY      X11 display，默认 :0
+```
+
+---
+
+## 兼容旧 Fedora 42 入口
+
+旧文件还保留，但只是 wrapper：
+
+```text
+scripts/start-xfce.sh
+scripts/restore-xfce.sh
+config/start-fedora-desktop.sh
+```
+
+它们都会转调：
+
+```bash
+/home/phablet/ubports-lxc/scripts/ut-lxc-desktop.sh start -n fedora42 -d fedora -r 42
+```
+
+旧的 `restore-xfce.sh` 里使用 TCP:32015 的方案已废弃。现在统一使用 TCP:32016，避免和 PulseAudio TCP module 形成环路。
+
+---
+
+## 架构
+
+```text
+容器应用
+  ↓
+DISPLAY=:0 / X11 socket
+  ↓
+/tmp/.X11-unix/X0 copied by hook
+  ↓
+Lomiri/XWayland/X server
+
+容器应用音频
+  ↓
+PULSE_SERVER=tcp:127.0.0.1:32016
+  ↓
+socat TCP-LISTEN:32016
+  ↓
+/run/user/32011/pulse/native
+  ↓
+Ubuntu Touch PulseAudio
+  ↓
+手机扬声器
+```
+
+容器使用：
+
+```text
+lxc.namespace.keep = net user
+```
+
+所以容器内的 `localhost` 是容器自己的 loopback。socat 监听宿主 `0.0.0.0:32016`，容器才能连到宿主转发通道。
+
+---
+
+## 生成的 LXC config 包含什么
+
+`configure` 会写入：
+
+```text
+/var/lib/lxc/<容器名>/config
+/var/lib/lxc/<容器名>/ut-desktop-hook.sh
+```
+
+关键配置：
+
+```text
 lxc.apparmor.profile = unconfined
-lxc.cgroup.devices.deny = a
 lxc.autodev = 0
 lxc.namespace.keep = net user
-EOF
+lxc.cgroup2.devices.deny = a
+lxc.mount.entry = /dev/null dev/null none bind,create=file 0 0
+lxc.mount.entry = /dev/zero dev/zero none bind,create=file 0 0
+lxc.mount.entry = /dev/random dev/random none bind,create=file 0 0
+lxc.mount.entry = /dev/urandom dev/urandom none bind,create=file 0 0
+lxc.mount.entry = /dev/dri dev/dri none bind,create=dir,optional 0 0
+lxc.mount.entry = /dev/input dev/input none bind,create=dir,optional 0 0
+lxc.mount.entry = /sys/devices/system/cpu sys/devices/system/cpu none bind,ro,create=dir,optional 0 0
 ```
 
-**2b. 创建必要设备节点：**
+hook 负责：
 
-```bash
-sudo mknod -m 666 /dev/loop-control c 10 237 2>/dev/null
-sudo mknod -m 666 /dev/net/tun c 10 200 2>/dev/null
-```
-
-**2c. 确认 cgroup 已挂载：**
-
-```bash
-mount | grep cgroup | head -3
-```
-
-如果 cgroup2 没有挂载，手动挂载：
-
-```bash
-sudo mkdir -p /sys/fs/cgroup
-sudo mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null || true
-```
+- 复制 X11 socket 到容器 rootfs
+- 复制 Wayland socket 作为备用
+- 复制 system D-Bus socket
+- 创建 /dev/null、/dev/zero、/dev/random、/dev/urandom
 
 ---
 
-### 第 3 步：创建 LXC 容器
+## sudoers
 
-**在宿主执行：**
-
-```bash
-# 下载并创建 Fedora 42 容器
-sudo lxc-create -n fedora42 -t download -- -d fedora -r 42 -a arm64
-```
-
-等待下载完成（约 5-10 分钟）。
-
----
-
-### 第 3 步：应用容器配置
-
-**在宿主执行：**
+桌面图标启动用 `sudo -n`，所以要先安装免密规则：
 
 ```bash
-# 复制容器配置（含 GPU、X11、PulseAudio 挂载）
-sudo cp config/fedora42-real.conf /var/lib/lxc/fedora42/config
-sudo chown root:root /var/lib/lxc/fedora42/config
-
-# 复制 X11 socket 转发 hook 脚本
-sudo cp config/fedora42-wayland-hook.sh /var/lib/lxc/fedora42-wayland-hook.sh
-sudo chmod +x /var/lib/lxc/fedora42-wayland-hook.sh
+sudo scripts/ut-lxc-desktop.sh sudoers
 ```
 
----
-
-### 第 4 步：创建 XFCE 桌面
-
-**进入容器执行：**
-
-```bash
-sudo lxc-start -n fedora42 -d
-sudo lxc-attach -n fedora42
-```
-
-**容器内执行：**
-
-```bash
-# 安装 XFCE 桌面
-dnf install -y --nogpgcheck @xfce-desktop
-
-# 安装 Chromium 浏览器和音频组件
-dnf install -y --nogpgcheck chromium pulseaudio-libs pulseaudio-utils alsa-plugins-pulseaudio
-
-# 创建 phablet 用户（与宿主的 UID 32011 对应）
-groupadd -g 32011 phablet
-useradd -u 32011 -g 32011 -m -d /home/phablet -s /bin/bash phablet
-usermod -aG video,render phablet
-
-# 安装启动脚本
-cp /ubuntu/start-xfce.sh /home/phablet/ 2>/dev/null || true
-
-# 容器内 Chromium 配置：禁用 session 启动
-chmod 0755 /home/phablet
-su - phablet -c "mkdir -p ~/.config/chromium"
-su - phablet -c 'cat > ~/.config/chromium/chrome-flags.conf << "EOF"
-PULSE_SERVER=tcp:localhost:32016
-EOF'
-
-exit
-```
-
----
-
-### 第 5 步：配置 Chromium 桌面菜单音频
-
-**在宿主执行：**
-
-```bash
-sudo lxc-attach -n fedora42 -- sh -c 'cat > /usr/share/applications/chromium-browser.desktop << "DESKTOP"
-[Desktop Entry]
-Version=1.0
-Name=Chromium Web Browser
-GenericName=Web Browser
-Comment=Access the Internet
-Exec=env PULSE_SERVER=tcp:localhost:32016 /usr/bin/chromium-browser %U
-StartupNotify=true
-Terminal=false
-Icon=chromium-browser
-Type=Application
-Categories=Network;WebBrowser;
-MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
-
-Desktop Actions=new-window;new-private-window;
-Actions=new-window;
-Desktop Action new-window;
-Name=New Window
-Exec=env PULSE_SERVER=tcp:localhost:32016 chromium-browser
-
-Actions=new-private-window;
-Desktop Action new-private-window;
-Name=New Incognito Window
-Exec=env PULSE_SERVER=tcp:localhost:32016 chromium-browser --incognito
-DESKTOP'
-```
-
----
-
-### 第 6 步：配置 sudo 免密码
-
-**在宿主执行：**
-
-```bash
-sudo visudo -f /etc/sudoers.d/fedora-desktop
-```
-
-在打开的编辑器中输入以下内容并保存：
-
-```
-phablet ALL=(ALL) NOPASSWD: /usr/bin/lxc-start, /usr/bin/lxc-info, /usr/bin/lxc-attach, /usr/bin/nsenter, /usr/bin/kill, /usr/bin/socat, /bin/bash /home/phablet/start-xfce.sh
-```
-
----
-
-### 第 7 步：安装桌面图标
-
-**在宿主执行：**
-
-```bash
-cp ~/ubports-lxc/config/fedora42-desktop.desktop ~/.local/share/applications/
-```
-
----
-
-### 第 8 步：安装 ALSA 音频转发配置
-
-**在宿主执行：**
-
-```bash
-# 复制 asoundrc（ALSA → PulseAudio TCP 管道）
-cp ~/ubports-lxc/config/.asoundrc ~/
-```
-
----
-
-### 第 9 步：重启手机
-
-重启后，在 Lomiri 桌面底部上划 → 应用抽屉 → 找到 **Fedora 42 桌面** 图标 → 点击即可进入 XFCE。
-
----
-
-## 文件说明
-
-| 文件 | 路径 | 作用 |
-|------|------|------|
-| `start-xfce.sh` | `scripts/` | 一键启动脚本（容器检测 → 设备修复 → 音频转发 → XFCE 启动） |
-| `start-fedora-desktop.sh` | `config/` | UT 桌面图标调用的包装脚本 |
-| `fedora42-desktop.desktop` | `config/` | UT 桌面图标定义文件 |
-| `fedora_logo.png` | `config/` | 桌面图标用 Fedora 标志 |
-| `fedora42-real.conf` | `config/` | 容器完整配置（GPU、X11、音频、sysfs） |
-| `fedora42-wayland-hook.sh` | `config/` | 容器启动自动复制 X11 socket 的 hook |
-| `.asoundrc` | `config/` | ALSA → PulseAudio TCP 转发配置 |
-
----
-
-## 一键启动脚本说明
-
-`scripts/start-xfce.sh` 执行流程：
-
-| # | 步骤 | 说明 |
-|---|------|------|
-| 1 | 启动容器 | 等待容器达到 RUNNING 状态（最多 15 秒） |
-| 2 | 修复设备 | 重建容器内 /dev/null、/dev/random、/dev/urandom |
-| 3 | 音频转发 | 启动 PulseAudio socat（TCP:32016），自动清除僵尸进程 |
-| 4 | 验证音频 | 检测音频通路是否正常 |
-| 5 | 禁用组件 | 关闭 xfce4-notifyd、xfce4-power-manager、蓝牙、包更新、tracker、PolicyKit |
-| 6 | 启动 XFCE | 在已有 X server 上启动 startxfce4 |
-
----
-
-## 容器配置模版
-
-`config/fedora42-lxc.conf` — 最小可用配置
-`config/fedora42-real.conf` — 实际使用的完整配置（推荐）
-
-关键配置项：
-
-- `lxc.apparmor.profile = unconfined` — 绕过 AppArmor 限制
-- `lxc.mount.auto = cgroup:mixed proc:mixed sys:mixed` — 只读挂载内核文件系统
-- `lxc.namespace.keep = net user` — 保留独立网络命名空间（容器有自己的 wlan0）
-- `lxc.mount.entry = /dev/dri/card0 ...` — GPU 直通
-- `lxc.mount.entry = /tmp/.X11-unix/X0 ...` — X11 socket 共享
-- `lxc.mount.entry = /sys/devices/system/cpu ...` — CPU 频率读取（Chromium 需要）
+当前规则只放行这个管理器和 lxc-create wrapper。
 
 ---
 
 ## 常见问题
 
-### 1. 重启后首次点击桌面图标没声音？
+### 点图标没反应
 
-第二次运行即可。容器刚启动时 socat 还未完全连通 PulseAudio socket，
-第二次运行自动重启 socat，音频恢复。
-
-### 2. 桌面图标点了一下，终端闪一下就消失？
-
-**原因：** sudo 需要密码，终端非交互模式被拒绝。
-**解决：** 确认 `/etc/sudoers.d/fedora-desktop` 已按第 7 步配置。
-
-### 3. 容器启动报 "failed to mount" 错误？
-
-**原因：** UT 内核 4.9 不支持 OverlayFS 或 AUFS。
-**解决：** 将容器配置中的 `lxc.rootfs.options` 改为 `dir` 存储后端，或参考第 2c 步手动挂载 cgroup2。
-
-### 4. lxc-create 报 "Permission denied" 或 AppArmor 错误？
-
-**原因：** UT 的 LXC 默认配置限制严格。
-**解决：** 按第 2 步配置 `/etc/lxc/default.conf`，设置 `apparmor.profile = unconfined` 和 `namespace.keep = net user`。
-
-### 5. "Failed to set process to user" 错误？
-
-**原因：** LXC 在独立 user namespace 中运行，宿主无法访问容器内进程。
-**解决：** 这是正常行为，不影响容器运行。使用 `lxc-attach` 代替 `nsenter` 进入容器。
-
-### 6. Chromium 启动报 "profile locked"？
+先看日志：
 
 ```bash
-sudo lxc-attach -n fedora42 -- su - phablet -c 'rm -f ~/.config/chromium/Singleton*'
+less /home/phablet/.cache/ubports-lxc/logs/<容器名>-launcher.log
+less /home/phablet/.cache/ubports-lxc/logs/<容器名>-xfce.log
 ```
 
-或每次启动时用 `--no-session-restore` 参数。
-
-### 5. 音频报 "Connection refused"？
-
-检查宿主 PulseAudio socket 和 socat：
+再跑：
 
 ```bash
-ls -la /run/user/32011/pulse/native
+/home/phablet/ubports-lxc/scripts/ut-lxc-desktop.sh doctor -n <容器名>
+```
+
+### 没声音
+
+检查：
+
+```bash
 ss -tlnp | grep 32016
+/home/phablet/ubports-lxc/scripts/ut-lxc-desktop.sh doctor -n <容器名>
 ```
 
-如果 socat 僵尸，杀进程组重启：
+如果 socat 僵死，脚本会先杀旧 socat 进程组，再起新的。
+
+### 容器启动失败
+
+看 LXC 日志：
 
 ```bash
-pkill -9 -f "socat.*32016"
-socat TCP-LISTEN:32016,reuseaddr,fork UNIX-CONNECT:/run/user/32011/pulse/native &
+less /tmp/<容器名>.log
 ```
 
-### 6. 如何退出 XFCE？
+### XFCE 字太小
 
-在 XFCE 面板点击退出菜单，或直接杀掉 XFCE 进程：
+默认已经部署 2x 缩放配置：
+
+```text
+configs/xfce/xsettings.xml
+configs/xfce/xfwm4.xml
+```
+
+如果是旧容器，重新执行：
 
 ```bash
-sudo lxc-attach -n fedora42 -- pkill -f "xfce4-session|xfce4-panel"
+sudo /home/phablet/ubports-lxc/scripts/ut-lxc-desktop.sh install -n <容器名> -d <fedora|ubuntu|debian> -r <release>
 ```
-
-XFCE 窗口关闭后，下次点击桌面图标会重新启动。
-
-### 7. XFCE 窗口太小 / 字体模糊？
-
-启动脚本已配置 192 DPI（2x 缩放），适合 1080×2340 屏幕。
-如需调整，手动修改容器内的缩放配置文件：
-
-```bash
-# 查看当前缩放配置
-sudo lxc-attach -n fedora42 -- cat /home/phablet/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml
-
-# 手动调整 DPI 和缩放因子
-sudo lxc-attach -n fedora42 -- su - phablet -c "cat > ~/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml << 'XML'
-<?xml version=\"1.1\" encoding=\"UTF-8\"?>
-<channel name=\"xsettings\" version=\"1.0\">
-  <property name=\"Net\" type=\"empty\">
-    <property name=\"ThemeName\" type=\"string\" value=\"Adwaita\"/>
-    <property name=\"IconThemeName\" type=\"string\" value=\"Adwaita\"/>
-  </property>
-  <property name=\"Xft\" type=\"empty\">
-    <property name=\"DPI\" type=\"int\" value=\"192\"/>
-    <property name=\"Hinting\" type=\"int\" value=\"1\"/>
-    <property name=\"HintStyle\" type=\"string\" value=\"hintslight\"/>
-    <property name=\"RGBA\" type=\"string\" value=\"rgb\"/>
-  </property>
-  <property name=\"Gtk\" type=\"empty\">
-    <property name=\"WindowScalingFactor\" type=\"int\" value=\"2\"/>
-    <property name=\"FontName\" type=\"string\" value=\"Sans 14\"/>
-    <property name=\"MonospaceFontName\" type=\"string\" value=\"Monospace 12\"/>
-    <property name=\"IconSizes\" type=\"string\" value=\"gtk-menu=32,gtk-button=32,gtk-large-toolbar=48\"/>
-  </property>
-</channel>
-XML"
-
-# 重启 XFCE 生效
-sudo lxc-attach -n fedora42 -- su - phablet -c 'DISPLAY=:0 xfce4-panel -r 2>/dev/null'
-```
-
-DPI 值参考（1080×2340 屏幕）：
-- **192** = 2x 缩放（推荐，字体够大）
-- **144** = 1.5x 缩放（偏小）
-- **96** = 原生 1x（手机屏太小，不推荐）
 
 ---
 
-> 本仓库地址：https://github.com/gmicroul/ubports-lxc
+## 文件说明
+
+```text
+scripts/ut-lxc-desktop.sh        通用容器桌面管理器
+scripts/start-xfce.sh            fedora42 兼容 wrapper
+scripts/restore-xfce.sh          fedora42 兼容 wrapper，旧 32015 方案已废弃
+scripts/lxc-ut-fix.sh            旧 UT LXC 修复脚本，保留参考
+config/start-fedora-desktop.sh   旧 fedora42 桌面图标 wrapper
+config/fedora42-desktop.desktop  旧 fedora42 desktop 文件
+configs/xfce/xsettings.xml       XFCE 2x 缩放配置
+configs/xfce/xfwm4.xml           XFWM4 手机窗口配置
+```
+
+---
+
+## 结论
+
+现在项目主线是：
+
+```text
+一次 bootstrap + 以后直接用 lxc-create + 自动 configure
+```
+
+如果你加 `--ut-install`，还能在创建时顺手把桌面也装上。
