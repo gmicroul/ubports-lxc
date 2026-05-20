@@ -22,6 +22,8 @@
 - 自动创建容器内 phablet 用户 uid=32011
 - 自动部署 XFCE 2x 缩放配置
 - 自动安装 Lomiri 应用抽屉图标
+- 图标启动使用 systemd transient unit 托管 Xephyr/XFCE，重启手机后可直接点图标进入桌面
+- stop 清理桌面会话、Xephyr、音频转发和容器
 - doctor 自检
 
 ---
@@ -105,37 +107,63 @@ sudo scripts/ut-lxc-desktop.sh all -n debian-trixie -d debian -r trixie
 
 ---
 
-## 启动容器桌面
+## 启动/停止容器桌面
 
-现在桌面入口会用 `sudo -n` 调起通用管理器，避免点图标时被 sudo 认证卡住。
+推荐使用应用抽屉图标启动。桌面图标会用 `sudo -n` 调起通用管理器，避免点图标时被 sudo 认证卡住。
+
+已验证：手机重启后，直接点击下面两个图标都能进入桌面：
+
+```text
+fedora42 桌面
+ubuntu24 桌面
+```
+
+图标启动链路现在走稳定模式：
+
+1. wrapper 设置 `UT_LXC_FORCE_NEW_XEPHYR=1`，每次启动前重建 Xephyr 窗口，避免复用坏掉的旧 socket。
+2. Xephyr 通过 `systemd-run --unit=ut-lxc-xephyr-<容器名>` 托管。
+3. 容器内 XFCE 通过 `systemd-run --unit=ut-lxc-xfce-<容器名>` 托管。
+4. `.desktop` 使用 `Terminal=false`，图标启动器退出后不会带走桌面进程。
 
 命令行启动：
 
 ```bash
-/home/phablet/ubports-lxc/scripts/ut-lxc-desktop.sh start -n fedora42
+sudo /home/phablet/ubports-lxc/scripts/ut-lxc-desktop.sh start -n fedora42 -u phablet --uid 32011 --port 32016 --display-mode xephyr --display :20
 ```
 
-嵌套单窗口模式，也就是整个 XFCE 桌面包在一个 Xephyr 窗口里：
+Ubuntu 容器示例：
 
 ```bash
-sudo /home/phablet/ubports-lxc/scripts/ut-lxc-desktop.sh start -n ubuntu24 -d ubuntu -r noble --nested
+sudo /home/phablet/ubports-lxc/scripts/ut-lxc-desktop.sh start -n ubuntu24 -d ubuntu -r noble -u phablet --uid 32011 --port 32016 --display-mode xephyr --display :21
 ```
 
-`--nested` 等价于 `--display-mode xephyr`，默认使用容器显示号 `:20`。这种模式下 Lomiri 只看到一个 Xephyr 窗口，XFCE 里的终端、文件管理器、浏览器都留在这个窗口内部。
+`--nested` 等价于 `--display-mode xephyr`，默认使用容器显示号 `:20`。如果同时保留多个容器桌面，建议显式指定不同 display，例如 fedora42 用 `:20`，ubuntu24 用 `:21`。
 
-或者点 Lomiri 应用抽屉里的：
+停止并清理桌面：
 
-```text
-fedora42 桌面
-ubuntu-noble 桌面
+```bash
+sudo /home/phablet/ubports-lxc/scripts/ut-lxc-desktop.sh stop -n fedora42 -u phablet --uid 32011 --port 32016 --display-mode xephyr --display :20
 ```
+
+`stop` 会清理：
+
+- `ut-lxc-xfce-<容器名>.service`
+- `ut-lxc-xephyr-<容器名>.service`
+- 容器内 `xfce4-session` / `xfwm4` / `xfdesktop` / `xfce4-panel` / `xfsettingsd`
+- PulseAudio socat relay
+- Xephyr socket/lock
+- LXC 容器本身
 
 日志位置：
 
 ```text
-/home/phablet/.cache/ubports-lxc/logs/<容器名>-launcher.log
-/home/phablet/.cache/ubports-lxc/logs/<容器名>-xfce.log
+/tmp/ut-lxc-<容器名>-launcher-32011.log
+/tmp/ut-lxc-<容器名>-xfce-host.log
+/tmp/ut-lxc-<容器名>-xfce-in-container.log
+/tmp/ut-lxc-xephyr-<容器名>.log
 ```
+
+旧日志路径 `/home/phablet/.cache/ubports-lxc/logs/<容器名>-xfce.log` 仍可能存在，但图标启动/host launcher 的主日志现在优先看 `/tmp/ut-lxc-*`。
 
 ---
 
@@ -176,7 +204,8 @@ install       在容器内安装桌面、用户、音频、配置
 repair        修复 /dev 节点并补完中断配置
 sudoers       安装 NOPASSWD sudoers 规则
 bootstrap     安装 lxc-create wrapper，以后 lxc-create 后自动 configure
-start         启动容器、启动音频转发、启动 XFCE
+start         启动容器、启动音频转发、启动 Xephyr/XFCE
+stop          停止 XFCE、Xephyr、音频转发和容器
 doctor        检查宿主/容器/显示/音频状态
 desktop-file  安装 Lomiri 应用抽屉图标
 all           create + configure + install + sudoers + desktop-file
@@ -196,6 +225,9 @@ all           create + configure + install + sudoers + desktop-file
 --display DISPLAY      X11 display，direct 默认 :0，xephyr 默认 :20
 --display-mode MODE    direct|xephyr
 --nested               等价于 --display-mode xephyr
+--nested-size WxH      Xephyr 窗口尺寸，默认 1280x720
+--nested-dpi DPI       Xephyr DPI，默认 168
+--nested-fullscreen 0|1 是否 fullscreen，默认 1
 ```
 
 ---
@@ -239,7 +271,11 @@ xephyr / nested 模式：
   ↓
 DISPLAY=:20 / X20 socket
   ↓
+ut-lxc-xfce-<容器名>.service
+  ↓
 宿主 Xephyr 窗口
+  ↓
+ut-lxc-xephyr-<容器名>.service
   ↓
 Lomiri 里的单个窗口
 
@@ -316,17 +352,25 @@ sudo scripts/ut-lxc-desktop.sh sudoers
 
 ### 点图标没反应
 
-先看日志：
+先看日志，不要盲猜：
 
 ```bash
-less /home/phablet/.cache/ubports-lxc/logs/<容器名>-launcher.log
-less /home/phablet/.cache/ubports-lxc/logs/<容器名>-xfce.log
+less /tmp/ut-lxc-<容器名>-launcher-32011.log
+less /tmp/ut-lxc-<容器名>-xfce-host.log
+less /tmp/ut-lxc-<容器名>-xfce-in-container.log
+journalctl -u ut-lxc-xephyr-<容器名>.service -u ut-lxc-xfce-<容器名>.service --no-pager -n 120
 ```
 
 再跑：
 
 ```bash
-/home/phablet/ubports-lxc/scripts/ut-lxc-desktop.sh doctor -n <容器名>
+sudo /home/phablet/ubports-lxc/scripts/ut-lxc-desktop.sh doctor -n <容器名> --display-mode xephyr --display :20
+```
+
+如果旧进程残留，先 stop 再点图标：
+
+```bash
+sudo /home/phablet/ubports-lxc/scripts/ut-lxc-desktop.sh stop -n <容器名> --display-mode xephyr --display :20
 ```
 
 ### 没声音
@@ -368,7 +412,7 @@ sudo /home/phablet/ubports-lxc/scripts/ut-lxc-desktop.sh install -n <容器名> 
 ## 文件说明
 
 ```text
-scripts/ut-lxc-desktop.sh        通用容器桌面管理器
+scripts/ut-lxc-desktop.sh        通用容器桌面管理器，负责 create/configure/install/start/stop/doctor
 scripts/start-xfce.sh            fedora42 兼容 wrapper
 scripts/restore-xfce.sh          fedora42 兼容 wrapper，旧 32015 方案已废弃
 scripts/lxc-ut-fix.sh            旧 UT LXC 修复脚本，保留参考
@@ -385,7 +429,7 @@ configs/xfce/xfwm4.xml           XFWM4 手机窗口配置
 现在项目主线是：
 
 ```text
-一次 bootstrap + 以后直接用 lxc-create + 自动 configure
+一次 bootstrap + 以后直接用 lxc-create + 自动 configure + 图标 systemd 托管启动
 ```
 
-如果你加 `--ut-install`，还能在创建时顺手把桌面也装上。
+如果你加 `--ut-install`，还能在创建时顺手把桌面也装上。桌面启动主线是 Xephyr/XFCE 都交给 systemd transient unit 托管，实测手机重启后直接点击 fedora42/ubuntu24 图标可进入桌面。

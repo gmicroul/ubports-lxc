@@ -51,6 +51,7 @@ Commands:
   sudoers       Install NOPASSWD sudoers rule for this manager
   bootstrap     Install lxc-create wrapper so future containers are auto-configured
   start         Start container, relay audio, launch desktop
+  stop          Stop desktop session, Xephyr window, audio relay, and container
   doctor        Check host/container/display/audio state
   desktop-file  Install Lomiri app drawer entry for this container
   all           create + configure + install + sudoers + desktop-file
@@ -81,7 +82,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 need_root_for() {
     case "$1" in
-        create|configure|install|repair|sudoers|bootstrap|start|all) [ "$(id -u)" = "0" ] || fail "'$1' needs root. Run: sudo $0 $1 ..." ;;
+        create|configure|install|repair|sudoers|bootstrap|start|stop|all) [ "$(id -u)" = "0" ] || fail "'$1' needs root. Run: sudo $0 $1 ..." ;;
     esac
 }
 
@@ -472,14 +473,31 @@ start_xephyr() {
     display_id="${DISPLAY_NUM#:}"
     pid="$(pgrep -f "Xephyr $DISPLAY_NUM" | head -1 || true)"
     if [ -n "$pid" ] && [ -S "/tmp/.X11-unix/X${display_id}" ]; then
-        echo "$pid" > "$(xephyr_pidfile)"
-        log "Xephyr nested display already running on $DISPLAY_NUM pid=$pid"
-        return 0
+        if [ "${UT_LXC_FORCE_NEW_XEPHYR:-0}" = "1" ]; then
+            log "Restarting stale/requested Xephyr nested display on $DISPLAY_NUM pid=$pid"
+            stop_xephyr
+        else
+            echo "$pid" > "$(xephyr_pidfile)"
+            log "Xephyr nested display already running on $DISPLAY_NUM pid=$pid"
+            return 0
+        fi
+    else
+        stop_xephyr
     fi
-    stop_xephyr
     [ "$NESTED_FULLSCREEN" = "1" ] && fullscreen_arg="-fullscreen"
-    setsid sudo -u phablet env DISPLAY=:0 XDG_RUNTIME_DIR="/run/user/$CONTAINER_UID" Xephyr "$DISPLAY_NUM" -screen "$NESTED_GEOMETRY" $fullscreen_arg -resizeable -ac -br -dpi "$NESTED_DPI" -retro </dev/null >/tmp/ut-lxc-xephyr-$CONTAINER.log 2>&1 &
-    sleep 3
+    # Start via a root-owned transient systemd unit instead of as a child of the
+    # launcher process. Lomiri may reap/kill short-lived .desktop children after
+    # the icon handler exits; systemd-run keeps Xephyr alive like manual shell
+    # launches do.
+    systemctl stop "ut-lxc-xephyr-$CONTAINER.service" >/dev/null 2>&1 || true
+    systemd-run --unit="ut-lxc-xephyr-$CONTAINER" --description="UT LXC Xephyr $CONTAINER $DISPLAY_NUM" \
+      --property=Type=simple --property=Restart=no \
+      --setenv=DISPLAY=:0 --setenv=XDG_RUNTIME_DIR="/run/user/$CONTAINER_UID" \
+      --uid=phablet --collect \
+      /usr/bin/Xephyr "$DISPLAY_NUM" -screen "$NESTED_GEOMETRY" $fullscreen_arg -resizeable -ac -br -dpi "$NESTED_DPI" -retro \
+      >/tmp/ut-lxc-xephyr-$CONTAINER.log 2>&1 || \
+      setsid sudo -u phablet env DISPLAY=:0 XDG_RUNTIME_DIR="/run/user/$CONTAINER_UID" Xephyr "$DISPLAY_NUM" -screen "$NESTED_GEOMETRY" $fullscreen_arg -resizeable -ac -br -dpi "$NESTED_DPI" -retro </dev/null >/tmp/ut-lxc-xephyr-$CONTAINER.log 2>&1 &
+    sleep 4
     pid="$(pgrep -f "Xephyr $DISPLAY_NUM" | head -1 || true)"
     [ -n "$pid" ] && echo "$pid" > "$(xephyr_pidfile)"
     [ -S "/tmp/.X11-unix/X${display_id}" ] || warn "Xephyr socket not ready: /tmp/.X11-unix/X${display_id}. Log: /tmp/ut-lxc-xephyr-$CONTAINER.log"
@@ -522,32 +540,82 @@ if ! pgrep -u '$CONTAINER_USER' -x xfsettingsd >/dev/null 2>&1; then xfsettingsd
     log "Launching XFCE in $CONTAINER on DISPLAY=$DISPLAY_FOR_CONTAINER"
     rm -f "$xfce_log"
     install -o phablet -g phablet -m 664 /dev/null "$xfce_log" 2>/dev/null || { : > "$xfce_log"; chown phablet:phablet "$xfce_log" 2>/dev/null || true; chmod 664 "$xfce_log" 2>/dev/null || true; }
-    run_root lxc-attach -n "$CONTAINER" -- sh -lc "pkill -9 -u '$CONTAINER_USER' -f 'xfce4-session|startxfce4|xfwm4|xfdesktop|xfsettingsd|xfce4-panel|plank|dock' 2>/dev/null || true" 2>/dev/null || true
+    run_root lxc-attach -n "$CONTAINER" -- sh -lc "pkill -9 -u '$CONTAINER_USER' -f 'xfce4-session|startxfce4|xfwm4|xfdesktop|xfsettingsd|xfce4-panel|plank|dock|xfconfd' 2>/dev/null || true" 2>/dev/null || true
     rm -f "$xfce_log"
     touch "$xfce_log"
     chown phablet:phablet "$xfce_log" 2>/dev/null || true
     chmod 664 "$xfce_log" 2>/dev/null || true
-    setsid bash -c 'if [ "$(id -u)" = "0" ]; then exec "$@"; else exec sudo "$@"; fi' _ lxc-attach -n "$CONTAINER" -- su - "$CONTAINER_USER" -c "
+    systemctl stop "ut-lxc-xfce-$CONTAINER.service" >/dev/null 2>&1 || true
+    local unit_log="/tmp/ut-lxc-$CONTAINER-xfce-host.log"
+    rm -f "$unit_log" 2>/dev/null || true
+    touch "$unit_log" 2>/dev/null || unit_log="/dev/null"
+    cat > "/tmp/ut-lxc-xfce-$CONTAINER.sh" <<EOF_XFCE_LAUNCH
+#!/usr/bin/env bash
+set +e
+exec >/tmp/ut-lxc-$CONTAINER-xfce-host.log 2>&1
+echo "host xfce launcher: \$(date) container=$CONTAINER display=$DISPLAY_FOR_CONTAINER"
+exec /usr/bin/lxc-attach -n "$CONTAINER" -- /bin/su - "$CONTAINER_USER" -c '
+set +e
+LOG=/tmp/ut-lxc-$CONTAINER-xfce-in-container.log
+exec >>"\$LOG" 2>&1
+echo "container xfce launcher: \$(date) display=$DISPLAY_FOR_CONTAINER"
 export DISPLAY=$DISPLAY_FOR_CONTAINER
 export PULSE_SERVER=tcp:localhost:$PULSE_TCP_PORT
 export GDK_SCALE=1
 export GDK_DPI_SCALE=1
 export QT_SCALE_FACTOR=1
+unset DBUS_SESSION_BUS_ADDRESS
+export XDG_RUNTIME_DIR=/run/user/$CONTAINER_UID
+mkdir -p ~/.cache/sessions ~/.config/xfce4/xfconf/xfce-perchannel-xml /run/user/$CONTAINER_UID 2>/dev/null || true
 rm -rf ~/.cache/sessions/xfce4* ~/.config/xfce4/sessions 2>/dev/null || true
+if command -v dbus-launch >/dev/null 2>&1; then
+  eval \$(dbus-launch --sh-syntax)
+  echo "DBUS_SESSION_BUS_ADDRESS=\$DBUS_SESSION_BUS_ADDRESS"
+else
+  echo "WARN dbus-launch missing; continuing"
+fi
 xfconf-query -c xsettings -p /Xft/DPI -s 168 2>/dev/null || true
-xfconf-query -c xsettings -p /Gtk/FontName -s 'Sans 16' 2>/dev/null || true
-xfconf-query -c xsettings -p /Gtk/MonospaceFontName -s 'Monospace 15' 2>/dev/null || true
+xfconf-query -c xsettings -p /Gtk/FontName -s "Sans 16" 2>/dev/null || true
+xfconf-query -c xsettings -p /Gtk/MonospaceFontName -s "Monospace 15" 2>/dev/null || true
 xfconf-query -c xsettings -p /Gtk/WindowScalingFactor -s 1 2>/dev/null || true
-xfconf-query -c xfwm4 -p /general/title_font -s 'Sans Bold 15' 2>/dev/null || true
+xfconf-query -c xfwm4 -p /general/title_font -s "Sans Bold 15" 2>/dev/null || true
 xfconf-query -c xfwm4 -p /general/border_width -s 4 2>/dev/null || true
+xfconf-query -c xfwm4 -p /general/workspace_count -s 1 2>/dev/null || true
 startxfce4 &
-sleep 5
-xfsettingsd --replace >/dev/null 2>&1 &
-xfwm4 --replace --sm-client-disable >/dev/null 2>&1 &
-xfdesktop --reload >/dev/null 2>&1 || true
-wait
-" > "$xfce_log" 2>&1 &
-    log "XFCE launch requested. Log: $xfce_log"
+xfce_pid=\$!
+sleep 7
+pgrep -u "$CONTAINER_USER" -x xfsettingsd >/dev/null 2>&1 || xfsettingsd --replace >>"\$LOG" 2>&1 &
+pgrep -u "$CONTAINER_USER" -x xfwm4 >/dev/null 2>&1 || xfwm4 --replace --sm-client-disable >>"\$LOG" 2>&1 &
+pgrep -u "$CONTAINER_USER" -x xfdesktop >/dev/null 2>&1 || xfdesktop >>"\$LOG" 2>&1 &
+pgrep -u "$CONTAINER_USER" -x xfce4-panel >/dev/null 2>&1 || xfce4-panel --disable-wm-check >>"\$LOG" 2>&1 &
+sleep 3
+ps -ef | grep -E "[x]fce4-session|[x]fce4-panel|[x]fwm4|[x]fdesktop|[x]fsettingsd|[d]bus-daemon" || true
+wait \$xfce_pid
+'
+EOF_XFCE_LAUNCH
+    chmod 755 "/tmp/ut-lxc-xfce-$CONTAINER.sh"
+    systemd-run --unit="ut-lxc-xfce-$CONTAINER" --description="UT LXC XFCE $CONTAINER $DISPLAY_FOR_CONTAINER" \
+      --property=Type=simple --property=Restart=no --collect \
+      /tmp/ut-lxc-xfce-$CONTAINER.sh >/dev/null 2>&1 || \
+      setsid /tmp/ut-lxc-xfce-$CONTAINER.sh >/dev/null 2>&1 &
+    log "XFCE launch requested. Host log: $unit_log Container log: /tmp/ut-lxc-$CONTAINER-xfce-in-container.log"
+}
+
+cmd_stop() {
+    need_root_for stop
+    log "Stopping UT LXC desktop: container=$CONTAINER display=$DISPLAY_NUM port=$PULSE_TCP_PORT"
+    systemctl stop "ut-lxc-xfce-$CONTAINER.service" >/dev/null 2>&1 || true
+    if run_root lxc-info -n "$CONTAINER" -s 2>/dev/null | tr -d '\n' | grep -q RUNNING; then
+        timeout 8 lxc-attach -n "$CONTAINER" -- sh -lc "pkill -9 -u '$CONTAINER_USER' -f 'xfce4-session|startxfce4|xfwm4|xfdesktop|xfsettingsd|xfce4-panel|xfconfd|plank|dock' 2>/dev/null || true" 2>/dev/null || true
+    fi
+    systemctl stop "ut-lxc-xephyr-$CONTAINER.service" >/dev/null 2>&1 || true
+    stop_xephyr
+    kill_socat_relay
+    if run_root lxc-info -n "$CONTAINER" -s 2>/dev/null | tr -d '\n' | grep -q RUNNING; then
+        timeout 12 lxc-stop -n "$CONTAINER" -k >/dev/null 2>&1 || timeout 12 lxc-stop -n "$CONTAINER" >/dev/null 2>&1 || true
+    fi
+    rm -f "/tmp/ut-lxc-xfce-$CONTAINER.sh" "/tmp/ut-lxc-$CONTAINER-xfce-host.log" "/tmp/ut-lxc-$CONTAINER-xfce-in-container.log" 2>/dev/null || true
+    log "Stopped UT LXC desktop: $CONTAINER"
 }
 
 cmd_doctor() {
@@ -588,7 +656,7 @@ cmd_sudoers() {
     need_root_for sudoers
     local sudoers="/etc/sudoers.d/ubports-lxc-desktop"
     cat > "$sudoers" <<EOF
-phablet ALL=(root) NOPASSWD: $REPO_DIR/scripts/ut-lxc-desktop.sh, /usr/bin/lxc-create, /usr/local/bin/lxc-create, /usr/bin/lxc-create.real
+phablet ALL=(root) NOPASSWD: $REPO_DIR/scripts/ut-lxc-desktop.sh, $REPO_DIR/scripts/ut-lxc-desktop.sh *, /usr/bin/lxc-create, /usr/local/bin/lxc-create, /usr/bin/lxc-create.real
 EOF
     chmod 440 "$sudoers"
     if command -v visudo >/dev/null 2>&1; then
@@ -655,12 +723,21 @@ cmd_desktop_file() {
     local wrapper="/home/phablet/.local/bin/ut-lxc-desktop-$CONTAINER"
     cat > "$wrapper" <<EOF
 #!/usr/bin/env bash
-mkdir -p "$LOG_DIR"
-log="$LOG_DIR/$CONTAINER-launcher.log"
-rm -f "\$log"
+set -u
+uid="\$(id -u 2>/dev/null || printf $CONTAINER_UID)"
+log="/tmp/ut-lxc-$CONTAINER-launcher-\${uid}.log"
+if [ -e "\$log" ] && [ ! -w "\$log" ]; then
+  log="/tmp/ut-lxc-$CONTAINER-launcher-\${uid}-\$\$.log"
+fi
+rm -f "\$log" 2>/dev/null || true
+: >"\$log" 2>/dev/null || log="/dev/null"
 {
-  sudo -n "$REPO_DIR/scripts/ut-lxc-desktop.sh" start -n "$CONTAINER" -u "$CONTAINER_USER" --uid "$CONTAINER_UID" --port "$PULSE_TCP_PORT" --display-mode "$DISPLAY_MODE" --display "$DISPLAY_NUM" 2>&1
-} | tee "\$log"
+  printf '%s\n' "==== \$(date) $CONTAINER launcher ===="
+  UT_LXC_FORCE_NEW_XEPHYR=1 sudo -n "$REPO_DIR/scripts/ut-lxc-desktop.sh" start -n "$CONTAINER" -u "$CONTAINER_USER" --uid "$CONTAINER_UID" --port "$PULSE_TCP_PORT" --display-mode "$DISPLAY_MODE" --display "$DISPLAY_NUM"
+  rc=\$?
+  printf '%s\n' "launcher rc=\$rc"
+  exit "\$rc"
+} >>"\$log" 2>&1
 EOF
     chmod 755 "$wrapper"
     local desktop="/home/phablet/.local/share/applications/ut-lxc-$CONTAINER.desktop"
@@ -669,7 +746,7 @@ EOF
 [Desktop Entry]
 Version=1.0
 Type=Application
-Terminal=true
+Terminal=false
 Exec=$wrapper
 Icon=$icon
 Name=$CONTAINER 桌面
@@ -679,7 +756,7 @@ Comment=在 Lomiri 桌面内启动 $CONTAINER 容器 XFCE 桌面
 EOF
     chown phablet:phablet "$wrapper" "$desktop" 2>/dev/null || true
     log "Installed launcher: $desktop"
-    log "Launcher log: $LOG_DIR/$CONTAINER-launcher.log"
+    log "Launcher log: /tmp/ut-lxc-$CONTAINER-launcher-$(id -u).log"
 }
 
 cmd_all() { cmd_create; cmd_configure; cmd_install; cmd_sudoers; cmd_desktop_file; }
@@ -694,6 +771,7 @@ main() {
         sudoers) cmd_sudoers ;;
         bootstrap) cmd_bootstrap ;;
         start) cmd_start ;;
+        stop) cmd_stop ;;
         doctor) cmd_doctor ;;
         desktop-file) cmd_desktop_file ;;
         all) cmd_all ;;
